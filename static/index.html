@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Papertrade Tools</title>
+<style>
+:root{--bg:#0b0f14;--card:#121821;--fg:#e7eef7;--muted:#8b9bb0;--acc:#6ea8fe;--bad:#ff6b6b;--ok:#51cf66}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+header{padding:16px 20px;border-bottom:1px solid #1e2836;display:flex;gap:16px;align-items:center}
+header h1{font-size:18px;margin:0}
+nav button{background:#1a2330;color:var(--fg);border:1px solid #2a3648;border-radius:8px;padding:8px 12px;cursor:pointer}
+nav button.active{background:var(--acc);color:#041018;border-color:transparent;font-weight:600}
+main{padding:20px;max-width:1100px;margin:0 auto}
+.card{background:var(--card);border:1px solid #1e2836;border-radius:12px;padding:16px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
+input,select{width:100%;padding:8px;border-radius:8px;border:1px solid #2a3648;background:#0e141c;color:var(--fg)}
+button.go{margin-top:12px;background:var(--acc);color:#041018;border:0;border-radius:8px;padding:10px 14px;font-weight:600;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:6px 8px;border-bottom:1px solid #1e2836;text-align:right}
+th:first-child,td:first-child{text-align:left}
+.kpi{font-size:20px;font-weight:700}.muted{color:var(--muted)}.bad{color:var(--bad)}.ok{color:var(--ok)}
+canvas{width:100%;height:220px;background:#0e141c;border-radius:8px}
+.hidden{display:none}pre{white-space:pre-wrap;font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Papertrade tools</h1>
+  <nav>
+    <button id="tab-calc" class="active" onclick="show('calc')">Calculator</button>
+    <button id="tab-mon" onclick="show('mon')">LP / Queue monitor</button>
+  </nav>
+</header>
+<main>
+<section id="calc">
+  <div class="card">
+    <div class="grid">
+      <div><label>Asset</label><select id="asset"><option>BTC</option><option>ETH</option></select></div>
+      <div><label>Direction</label><select id="dir"><option>long</option><option>short</option></select></div>
+      <div><label>Margin (USD)</label><input id="margin" type="number" value="100"/></div>
+      <div><label>Leverage</label><input id="lev" type="number" value="100"/></div>
+      <div><label>Entry (blank = live mid)</label><input id="entry" type="number" step="any" placeholder="live BBO mid"/></div>
+    </div>
+    <button class="go" onclick="runCalc()">Calculate</button>
+  </div>
+  <div class="card" id="calc-out"><span class="muted">Run a calculation…</span></div>
+</section>
+<section id="mon" class="hidden">
+  <div class="card grid" id="kpis"></div>
+  <div class="card"><canvas id="chart"></canvas></div>
+  <div class="card"><h3>Stress (house PnL if closes at shocked mid)</h3><div id="stress"></div></div>
+  <div class="card"><h3>Alerts</h3><pre id="alerts">loading…</pre></div>
+</section>
+</main>
+<script>
+function show(which){
+  calc.classList.toggle('hidden', which!=='calc');
+  mon.classList.toggle('hidden', which!=='mon');
+  document.getElementById('tab-calc').classList.toggle('active', which==='calc');
+  document.getElementById('tab-mon').classList.toggle('active', which==='mon');
+  if(which==='mon') refreshMon();
+}
+async function runCalc(){
+  const q=new URLSearchParams({
+    asset:asset.value, direction:dir.value, margin:margin.value, leverage:lev.value
+  });
+  if(entry.value) q.set('entry', entry.value);
+  const r=await fetch('/api/calc?'+q).then(r=>r.json());
+  const el=document.getElementById('calc-out');
+  if(!r.ok){el.innerHTML='<span class="bad">'+r.error+'</span>';return;}
+  const x=r.result;
+  let html=`<div class="grid">
+    <div><div class="muted">Entry</div><div class="kpi">${x.entry_usd.toFixed(2)}</div></div>
+    <div><div class="muted">Bust / liq</div><div class="kpi bad">${x.bust_price_usd.toFixed(2)}</div><div class="muted">${x.bust_move_bp.toFixed(2)} bp</div></div>
+    <div><div class="muted">Zero equity</div><div class="kpi">${x.zero_equity_price_usd.toFixed(2)}</div><div class="muted">${x.zero_equity_move_bp.toFixed(2)} bp</div></div>
+    <div><div class="muted">Breakeven move</div><div class="kpi">${x.breakeven_move_pct==null?'—':x.breakeven_move_pct.toFixed(4)+'%'}</div></div>
+    <div><div class="muted">Equity if self-close at bust</div><div class="kpi">${x.equity_if_self_close_at_bust_usd.toFixed(4)}</div>
+      <div class="muted">pnl ${x.pnl_if_self_close_at_bust_usd.toFixed(4)}</div></div>
+  </div>
+  <p class="muted">Notional $${x.notional_usd.toLocaleString()} · deadband 0.2bp · haircut · 2% win fee · bust buffer ${x.params.bust_buffer_bp.toFixed(2)} bp
+  ${x.bbo?` · live mid source ${x.bbo.source}`:''}</p>
+  <table><thead><tr><th>Move</th><th>Exit</th><th>Raw</th><th>After haircut</th><th>Fee</th><th>Net</th><th>% of raw kept</th><th>Equity</th></tr></thead><tbody>`;
+  for(const row of x.move_table){
+    html+=`<tr><td>${row.move_pct}%</td><td>${row.exit_usd.toFixed(2)}</td><td>${row.raw_pnl_usd.toFixed(4)}</td>
+      <td>${row.after_haircut_usd.toFixed(4)}</td><td>${row.fee_usd.toFixed(4)}</td><td>${row.net_usd.toFixed(4)}</td>
+      <td>${row.pct_of_raw_kept.toFixed(2)}%</td><td>${row.equity_usd.toFixed(4)}</td></tr>`;
+  }
+  html+='</tbody></table>';
+  el.innerHTML=html;
+}
+function fmt(n){if(n==null)return '—'; return Number(n).toLocaleString(undefined,{maximumFractionDigits:2})}
+async function refreshMon(){
+  const [lat, hist, al] = await Promise.all([
+    fetch('/api/monitor/latest').then(r=>r.json()),
+    fetch('/api/monitor/history?limit=120').then(r=>r.json()),
+    fetch('/api/alerts').then(r=>r.json()),
+  ]);
+  const s=lat.sample||{};
+  const b=s.balances||{};
+  document.getElementById('kpis').innerHTML=`
+    <div><div class="muted">LP</div><div class="kpi">$${fmt(b.lp)}</div></div>
+    <div><div class="muted">Locked margin</div><div class="kpi">$${fmt(b.margin)}</div></div>
+    <div><div class="muted">Queue debt</div><div class="kpi ${s.queue_debt>0?'bad':''}">$${fmt(s.queue_debt)}</div></div>
+    <div><div class="muted">House PnL (marked)</div><div class="kpi ${(s.house_pnl_usd||0)<0?'bad':'ok'}">$${fmt(s.house_pnl_usd)}</div>
+      <div class="muted">site ${fmt(s.site_house_pnl_usd)} · opens ${s.open_mark?.open_count||0} (${s.open_source})</div></div>
+    <div><div class="muted">Headroom</div><div class="kpi ${(s.headroom_pct||0)<25?'bad':'ok'}">$${fmt(s.headroom_usd)}</div>
+      <div class="muted">${(s.headroom_pct||0).toFixed?.(1)}% of LP</div></div>
+    <div><div class="muted">BTC mid</div><div class="kpi">${fmt(s.mids?.BTC)}</div>
+      <div class="muted">L/S OI ${fmt(s.oi?.BTC?.long_oi)} / ${fmt(s.oi?.BTC?.short_oi)}</div></div>
+    <div><div class="muted">ETH mid</div><div class="kpi">${fmt(s.mids?.ETH)}</div>
+      <div class="muted">L/S OI ${fmt(s.oi?.ETH?.long_oi)} / ${fmt(s.oi?.ETH?.short_oi)}</div></div>`;
+  let st='<table><thead><tr><th>Case</th><th>House PnL</th><th>Delta</th></tr></thead><tbody>';
+  for(const row of (s.stress||[])){
+    st+=`<tr><td>${row.label}</td><td class="${row.house_pnl_usd<0?'bad':'ok'}">$${fmt(row.house_pnl_usd)}</td><td>$${fmt(row.delta_usd)}</td></tr>`;
+  }
+  st+='</tbody></table>';
+  document.getElementById('stress').innerHTML=st||'<span class="muted">No open set to stress.</span>';
+  document.getElementById('alerts').textContent=(al.alerts||[]).map(a=>new Date(a.ts*1000).toLocaleString()+' ['+a.kind+'] '+a.message).join('\n')||'No alerts yet.';
+  drawChart(hist.history||[]);
+}
+function drawChart(h){
+  const c=document.getElementById('chart'); const ctx=c.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  c.width=c.clientWidth*dpr; c.height=220*dpr; ctx.scale(dpr,dpr);
+  const w=c.clientWidth, ht=220; ctx.clearRect(0,0,w,ht);
+  if(h.length<2){ctx.fillStyle='#8b9bb0';ctx.fillText('Collecting history…',12,24);return;}
+  const xs=h.map(p=>p.ts), ys=h.map(p=>p.headroom);
+  const minY=Math.min(...ys), maxY=Math.max(...ys), pad=1;
+  const x0=40,y0=10,x1=w-10,y1=ht-24;
+  const X=t=>x0+(t-xs[0])/(xs[xs.length-1]-xs[0]||1)*(x1-x0);
+  const Y=v=>y1-(v-minY)/((maxY-minY)||1)*(y1-y0);
+  ctx.strokeStyle='#2a3648';ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x0,y1);ctx.lineTo(x1,y1);ctx.stroke();
+  ctx.strokeStyle='#6ea8fe';ctx.beginPath();
+  h.forEach((p,i)=>{const x=X(p.ts),y=Y(p.headroom); i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+  ctx.stroke();
+  ctx.fillStyle='#8b9bb0';ctx.fillText('Headroom USD',x0+6,y0+12);
+}
+setInterval(()=>{if(!mon.classList.contains('hidden')) refreshMon();},15000);
+</script>
+</body>
+</html>

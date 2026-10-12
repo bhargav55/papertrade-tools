@@ -1,0 +1,16 @@
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.parquet
+*.csv
+raw_logs.jsonl*
+*.log
+.DS_Store
+.env
+*.db
+monitor.db
+server.log
+alerts.log
